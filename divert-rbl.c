@@ -150,12 +150,12 @@ main(int argc, char *argv[])
     host = lookup_rbl(ip->ip_src.s_addr, "zen.spamhaus.org");
     if(host){
       printf("Host %s resolved\n", src);
-      nadd = pf_add_to_table(ip->ip_src, "spammers");
+      nadd = pf_add_to_table(ip->ip_src, "rbl-spammers");
       printf("SPAM: Host %s returned as spam\n", src);
       /* Drop.. */
     } else {
       printf("Host %s did not resolve\n", src);
-      nadd = pf_add_to_table(ip->ip_src, "not-spammers");
+      nadd = pf_add_to_table(ip->ip_src, "rbl-clean");
       printf("CLEAN: Host %s returned as not spam\n", src);
       n = sendto(fd, packet, n, 0, (struct sockaddr *) &sin, sin_len);
       if (n == -1){
