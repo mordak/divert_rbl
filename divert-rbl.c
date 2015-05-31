@@ -22,7 +22,7 @@
 #define PF_DEV "/dev/pf"
 #define UNPRIVILEGED_USER "nobody"
 #define CHROOT_DIR "/var/empty"
-#define RBL_DOMAIN "opennet.ca"
+#define RBL_DOMAIN "zen.spamhaus.org"
 
 struct hostent* lookup_rbl(in_addr_t n_ip, char* domain){
   char lookup[MAXHOSTNAMELEN];
