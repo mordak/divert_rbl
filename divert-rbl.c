@@ -14,8 +14,15 @@
 #include <unistd.h>
 #include <string.h>
 #include <err.h>
+#include <pwd.h>
+#include <syslog.h>
+#include <stdarg.h>
 
 #define DIVERT_PORT 2525
+#define PF_DEV "/dev/pf"
+#define UNPRIVILEGED_USER "nobody"
+#define CHROOT_DIR "/var/empty"
+#define RBL_DOMAIN "opennet.ca"
 
 struct hostent* lookup_rbl(in_addr_t n_ip, char* domain){
   char lookup[MAXHOSTNAMELEN];
@@ -39,8 +46,7 @@ struct hostent* lookup_rbl(in_addr_t n_ip, char* domain){
     warn("snprintf overflow in lookup_rbl");
     return NULL;
   }
-  
-  printf("Looking up %s\n", lookup);
+
   return gethostbyname(lookup);
 }
 
@@ -50,13 +56,11 @@ int pf_add_to_table(struct in_addr n_ip, char* table){
   struct pfr_addr pf_addr;
   struct pfr_table pf_table;
   int pf_fd;
-  char* pf_dev = "/dev/pf";
-  
+
   memset(&io, 0, sizeof(io));
   memset(&pf_addr, 0, sizeof(pf_addr));
   memset(&pf_table, 0, sizeof(pf_table));
 
-  //pf_addr.pfra_u._pfra_ip4addr = n_ip;
   pf_addr.pfra_ip4addr = n_ip;
   pf_addr.pfra_af = AF_INET;
   pf_addr.pfra_net = 32;
@@ -71,7 +75,7 @@ int pf_add_to_table(struct in_addr n_ip, char* table){
   io.pfrio_size = 1;
   io.pfrio_esize = sizeof(struct pfr_addr);
 
-  pf_fd = open(pf_dev, O_RDWR);
+  pf_fd = open(PF_DEV, O_RDWR);
   if(pf_fd == -1){
     warn("open pf_dev failed in pf_add_to_table");
     return -1;
@@ -85,22 +89,26 @@ int pf_add_to_table(struct in_addr n_ip, char* table){
     warn("Close failed in pf_add_to_table");
     return -1;
   }
-  /* io.pfrio_nadd should == 1 if successful */
   return io.pfrio_nadd;
 }
 
-int
-main(int argc, char *argv[])
-{
-  int fd, s;
+void child_fatal(int exit_val, char* message){
+  warn(message);
+  _exit(exit_val);
+}
+
+int main(int argc, char *argv[]){
+  int fd;
   struct sockaddr_in sin;
   socklen_t sin_len;
-  struct hostent* host;
+  int q_pipe[2];
+  int r_pipe[2];
+  pid_t cpid;
 
+  /* set up the divert socket */
   fd = socket(AF_INET, SOCK_RAW, IPPROTO_DIVERT);
-  if (fd == -1){
+  if (fd == -1)
     err(1, "socket");
-  }
 
   memset(&sin, 0, sizeof(sin));
   sin.sin_family = AF_INET;
@@ -109,60 +117,111 @@ main(int argc, char *argv[])
 
   sin_len = sizeof(struct sockaddr_in);
 
-  s = bind(fd, (struct sockaddr *) &sin, sin_len);
-  if (s == -1){
+  if(bind(fd, (struct sockaddr *) &sin, sin_len) == -1)
     err(1, "bind");
-  }
 
-  for (;;) {
-    ssize_t n;
-    char packet[IP_MAXPACKET];
-    char src[INET_ADDRSTRLEN + 1];
-    //char dst[INET_ADDRSTRLEN + 1];
-    struct ip *ip;
-    int nadd;
+  /* set up the pipe for privsep */
+  if(pipe(q_pipe) == -1)
+    err(1, "pipe");
+  if(pipe(r_pipe) == -1)
+    err(1, "pipe");
 
-    memset(packet, 0, sizeof(packet));
-    memset(src, 0, sizeof(src));
-    //memset(dst, 0, sizeof(dst));
+  /* now fork and do the work */
+  if((cpid = fork())){
+    /* parent */
+    int num_b;
+    //int fd_i
+    struct in_addr new_ip;
+    char psync;
+    struct hostent* host;
 
-    n = recvfrom(fd, packet, sizeof(packet), 0, (struct sockaddr *) &sin, &sin_len);
-    if (n == -1) {
-      warn("recvfrom");
-      continue;
+    close(fd);
+
+    for(;;){
+      memset(&new_ip, 0, sizeof(struct in_addr));
+
+      num_b = read(q_pipe[0], &new_ip, sizeof(struct in_addr));
+      if(num_b == -1)
+        err(129, "parent read from q_pipe");
+      if(num_b == 0)
+        err(130, "parent read EOF from q_pipe");
+      host = lookup_rbl(new_ip.s_addr, RBL_DOMAIN);
+      if(host){
+        psync = 1;
+        if(pf_add_to_table(new_ip, "rbl-spammers") == -1)
+          warnx("Could not add ip to table rbl-spammers");
+      } else {
+        psync = 0;
+        if(pf_add_to_table(new_ip, "rbl-clean") == -1)
+          warnx("Could not add ip to table rbl-clean");
+      }
+
+      if(write(r_pipe[1], &psync, 1) == -1)
+        err(128, "parent write to r_pipe");
     }
-    if (n < sizeof(struct ip)) {
-      warnx("packet is too short");
-      continue;
-    }
+  } else {
+    /* child */
+    struct passwd *pw;
 
-    ip = (struct ip *) packet;
+    /* drop privileges and chroot */
+    pw = getpwnam(UNPRIVILEGED_USER);
+    if(chroot(CHROOT_DIR) == -1)
+      child_fatal(2, "Could not chroot");
+    if(chdir("/") == -1)
+      child_fatal(3, "Could not chdir to /");
+    if(pw == NULL)
+      child_fatal(5, "Could not fetch user nobody");
+    if (setgroups(1, &pw->pw_gid) ||
+        setresgid(pw->pw_gid, pw->pw_gid, pw->pw_gid) ||
+        setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid))
+      child_fatal(4, "Could not drop privileges");
 
-    if (inet_ntop(AF_INET, &ip->ip_src, src, sizeof(src)) == NULL){
-      warn("inet_ntop failed");
-      continue;
-    }
-    printf("src: %s\n", src);
-    
-    //inet_ntop(AF_INET, &ip->ip_dst, dst, sizeof(dst));
-    //printf("src: %s  dst: %s (len: %u)\n", src, dst, ip->ip_len);
+    /* loop forever */
+    for (;;) {
+      ssize_t n;
+      char packet[IP_MAXPACKET];
+      char src[INET_ADDRSTRLEN + 1];
+      struct ip *ip;
+      char sync;
+      int num_bc;
 
-    host = lookup_rbl(ip->ip_src.s_addr, "zen.spamhaus.org");
-    if(host){
-      printf("Host %s resolved\n", src);
-      nadd = pf_add_to_table(ip->ip_src, "rbl-spammers");
-      printf("SPAM: Host %s returned as spam\n", src);
-      /* Drop.. */
-    } else {
-      printf("Host %s did not resolve\n", src);
-      nadd = pf_add_to_table(ip->ip_src, "rbl-clean");
-      printf("CLEAN: Host %s returned as not spam\n", src);
-      n = sendto(fd, packet, n, 0, (struct sockaddr *) &sin, sin_len);
-      if (n == -1){
-        warn("sendto");
+      memset(packet, 0, sizeof(packet));
+      memset(src, 0, sizeof(src));
+
+      n = recvfrom(fd, packet, sizeof(packet), 0, (struct sockaddr *) &sin, &sin_len);
+      if (n == -1) {
+        warn("recvfrom");
+        continue;
+      }
+      if (n < sizeof(struct ip)) {
+        warnx("packet is too short");
+        continue;
+      }
+
+      /* pull off the ip header */
+      ip = (struct ip *) packet;
+      if (inet_ntop(AF_INET, &ip->ip_src, src, sizeof(src)) == NULL){
+        warn("inet_ntop failed");
+        continue;
+      }
+
+      /* send the ip to the parent, which tells us if it's a spammer */
+      if(write(q_pipe[1], &ip->ip_src.s_addr, sizeof(struct in_addr)) == -1)
+        child_fatal(128, "child write to q_pipe");
+      num_bc = read(r_pipe[0], &sync, 1);
+      if(num_bc == -1)
+        child_fatal(129, "child read from r_pipe");
+      if(num_bc == 0)
+        child_fatal(130, "child read EOF from r_pipe");
+      if(sync){
+        syslog(LOG_INFO, "SPAM: %s\n", src);
+        /* Drop.. */
+      } else {
+        syslog(LOG_INFO, "CLEAN: %s", src);
+        if(sendto(fd, packet, n, 0, (struct sockaddr *) &sin, sin_len) == -1)
+          warn("sendto");
       }
     }
   }
-
   return 0;
 }
