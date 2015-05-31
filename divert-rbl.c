@@ -102,7 +102,6 @@ int main(int argc, char *argv[]){
   struct sockaddr_in sin;
   socklen_t sin_len;
   int q_pipe[2];
-  int r_pipe[2];
   pid_t cpid;
 
   /* set up the divert socket */
@@ -123,14 +122,11 @@ int main(int argc, char *argv[]){
   /* set up the pipe for privsep */
   if(pipe(q_pipe) == -1)
     err(1, "pipe");
-  if(pipe(r_pipe) == -1)
-    err(1, "pipe");
 
   /* now fork and do the work */
   if((cpid = fork())){
     /* parent */
     int num_b;
-    //int fd_i
     struct in_addr new_ip;
     char psync;
     struct hostent* host;
@@ -156,8 +152,8 @@ int main(int argc, char *argv[]){
           warnx("Could not add ip to table rbl-clean");
       }
 
-      if(write(r_pipe[1], &psync, 1) == -1)
-        err(128, "parent write to r_pipe");
+      if(write(q_pipe[0], &psync, 1) == -1)
+        err(128, "parent write to q_pipe");
     }
   } else {
     /* child */
@@ -208,11 +204,11 @@ int main(int argc, char *argv[]){
       /* send the ip to the parent, which tells us if it's a spammer */
       if(write(q_pipe[1], &ip->ip_src.s_addr, sizeof(struct in_addr)) == -1)
         child_fatal(128, "child write to q_pipe");
-      num_bc = read(r_pipe[0], &sync, 1);
+      num_bc = read(q_pipe[1], &sync, 1);
       if(num_bc == -1)
-        child_fatal(129, "child read from r_pipe");
+        child_fatal(129, "child read from q_pipe");
       if(num_bc == 0)
-        child_fatal(130, "child read EOF from r_pipe");
+        child_fatal(130, "child read EOF from q_pipe");
       if(sync){
         syslog(LOG_INFO, "SPAM: %s\n", src);
         /* Drop.. */
