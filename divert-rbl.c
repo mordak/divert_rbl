@@ -23,7 +23,9 @@
 #define UNPRIVILEGED_USER "nobody"
 #define CHROOT_DIR "/var/empty"
 #define RBL_DOMAIN "zen.spamhaus.org"
-
+/*
+#define RDR_MAIL_HOST "a.b.c.d"
+*/
 struct hostent* lookup_rbl(in_addr_t n_ip, char* domain){
   char lookup[MAXHOSTNAMELEN];
   char rev_src[INET_ADDRSTRLEN];
@@ -158,6 +160,12 @@ int main(int argc, char *argv[]){
   } else {
     /* child */
     struct passwd *pw;
+    ssize_t n;
+    char packet[IP_MAXPACKET];
+    char src[INET_ADDRSTRLEN + 1];
+    struct ip *ip;
+    char sync;
+    int num_bc;
 
     /* drop privileges and chroot */
     pw = getpwnam(UNPRIVILEGED_USER);
@@ -174,12 +182,6 @@ int main(int argc, char *argv[]){
 
     /* loop forever */
     for (;;) {
-      ssize_t n;
-      char packet[IP_MAXPACKET];
-      char src[INET_ADDRSTRLEN + 1];
-      struct ip *ip;
-      char sync;
-      int num_bc;
 
       memset(packet, 0, sizeof(packet));
       memset(src, 0, sizeof(src));
@@ -214,8 +216,17 @@ int main(int argc, char *argv[]){
         /* Drop.. */
       } else {
         syslog(LOG_INFO, "CLEAN: %s", src);
+        /* Don't forward the packet - the retransmit syn packet will create
+         * the state in pf. Even if we forward the packet to the real mail
+         * server, the SYNACK response won't match any state in pf, and it
+         * will be dropped anyway. Just add the sender IP to rbl-clean, and 
+         * let the SYN retransmit set up the state normally.. */
+        /*
+        if(inet_pton(AF_INET, RDR_MAIL_HOST, &ip->ip_dst) != 1)
+          warn("inet_pton failed");
         if(sendto(fd, packet, n, 0, (struct sockaddr *) &sin, sin_len) == -1)
           warn("sendto");
+        */
       }
     }
   }
