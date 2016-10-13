@@ -2,7 +2,7 @@
 
 This is an OpenBSD program that listens on a divert socket and performs real
 time blacklist (RBL) checks for the source IP address on any packets that
-arrive. Based on the result, the IP is added to a <rbl-spammers> or <rbl-clean>
+arrive. Based on the result, the IP is added to a `rbl-spammers` or `rbl-clean`
 table in pf. When combined with pass or block rules using those tables, this
 enables RBL protection for a mail server. 
 
